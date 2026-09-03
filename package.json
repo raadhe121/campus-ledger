@@ -1,0 +1,22 @@
+{
+  "name": "campus-ledger",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Multi-tenant school management system — monorepo root",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "pnpm@10.26.2",
+  "scripts": {
+    "dev:web": "doppler run -- pnpm --filter @campus-ledger/web dev",
+    "dev:api": "doppler run -- pnpm --filter @campus-ledger/api dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "prisma:generate": "doppler run -- pnpm --filter @campus-ledger/api prisma:generate",
+    "prisma:migrate": "doppler run -- pnpm --filter @campus-ledger/api prisma:migrate",
+    "prisma:studio": "doppler run -- pnpm --filter @campus-ledger/api prisma:studio",
+    "db:up": "docker compose up -d postgres redis",
+    "db:down": "docker compose down"
+  }
+}

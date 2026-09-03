@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/* A formal, institutional palette — navy/teal, dense information blocks,
+   a utility bar above the nav — the register a real school's own public
+   site uses, deliberately distinct from both the internal admin app's
+   Inter-only corporate-blue system (apps/web/src/index.css) and this
+   app's earlier warm/editorial look. `--brand` isn't set here — it's
+   injected at runtime once a school's own themeColor loads (see
+   lib/theme.ts), so every deployment gets its own accent from the same
+   stylesheet; `--color-navy`/`--color-teal` stay fixed regardless of a
+   school's chosen accent, for the chrome (ticker, footer) that should
+   read the same "institutional" way across every deployment. */
+@theme {
+  --color-ink: #101d33;
+  --color-paper: #f6f7fa;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef1f6;
+  --color-muted: #5b6472;
+  --color-line: #dfe3ea;
+  --color-navy: #0b2545;
+  --color-navy-2: #123a68;
+  --color-teal: #0f766e;
+  --color-gold: #c8932a;
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root {
+  --brand: #0b2545;
+  --brand-ink: #ffffff;
+}
+
+body {
+  @apply bg-paper text-ink antialiased font-sans;
+  text-rendering: optimizeLegibility;
+}
+
+/* Pure-CSS marquee for the announcement ticker — no JS timer to manage,
+   pauses on hover/focus so it's actually readable. Respects users who've
+   asked for less motion. */
+@keyframes ticker-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.ticker-track {
+  animation: ticker-scroll 28s linear infinite;
+}
+
+.ticker-track:hover,
+.ticker-track:focus-within {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track {
+    animation: none;
+  }
+}

@@ -1,0 +1,941 @@
+// Campus Ledger — Prisma schema
+//
+// Phase 00 seeds only the tenant/identity foundation (School, User,
+// RefreshToken, AuditLog) described in the architecture doc §03/§06.
+// Academic, attendance, exam, fee and communication models are added
+// module-by-module as each build phase (§11) reaches them.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  SCHOOL_ADMIN
+  TEACHER
+  STUDENT
+  PARENT
+  ACCOUNTANT
+  STAFF
+}
+
+enum SchoolStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  TRANSFERRED
+  WITHDRAWN
+  COMPLETED
+}
+
+enum ParentRelation {
+  FATHER
+  MOTHER
+  GUARDIAN
+  OTHER
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+enum ExamType {
+  UNIT_TEST
+  MIDTERM
+  FINAL
+  OTHER
+}
+
+enum FeeFrequency {
+  ONE_TIME
+  MONTHLY
+  QUARTERLY
+  HALF_YEARLY
+  ANNUAL
+}
+
+/// No OVERDUE state stored here — "overdue" is dueDate < today AND status
+/// != PAID, computed at read time (§04's grade-computed-server-side
+/// pattern applied to money instead of marks) rather than a value that
+/// could go stale without a reminders job (Phase 07's BullMQ queues).
+enum StudentFeeStatus {
+  PENDING
+  PARTIAL
+  PAID
+}
+
+/// §12: no live gateway (Stripe/Razorpay) in scope for Phase 06 — every
+/// value here describes how money moved *outside* the app; `reference` on
+/// Payment is a free-text cheque/transaction number, never a gateway id.
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  CHEQUE
+  ONLINE
+  OTHER
+}
+
+/// The tenant. Every school-owned row elsewhere in the schema carries a
+/// schoolId foreign key back to this table — see §06 for the isolation
+/// model that makes that column load-bearing rather than decorative.
+model School {
+  id           String       @id @default(cuid())
+  name         String
+  slug         String       @unique
+  status       SchoolStatus @default(ACTIVE)
+  plan         String       @default("standard")
+  contactEmail String
+  address      String?
+
+  users User[]
+
+  academicYears     AcademicYear[]
+  classes           Class[]
+  sections          Section[]
+  subjects          Subject[]
+  studentProfiles   StudentProfile[]
+  staffProfiles     StaffProfile[]
+  enrollments       Enrollment[]
+  parentStudents    ParentStudent[]
+  attendanceRecords AttendanceRecord[]
+  timetableSlots    TimetableSlot[]
+  exams             Exam[]
+  examSubjects      ExamSubject[]
+  results           Result[]
+  assignments       Assignment[]
+  submissions       Submission[]
+
+  feeStructures   FeeStructure[]
+  feeItems        FeeItem[]
+  studentFees     StudentFee[]
+  payments        Payment[]
+  receipts        Receipt[]
+  expenses        Expense[]
+  idempotencyKeys IdempotencyKey[]
+
+  website       SchoolWebsite?
+  announcements SchoolAnnouncement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("schools")
+}
+
+/// One table, seven roles. Role-specific fields live in a 1:1 profile
+/// model added per phase (StudentProfile, StaffProfile, ...) rather than
+/// a separate user table per role — one auth path for everyone (§04).
+model User {
+  id           String     @id @default(cuid())
+  email        String
+  passwordHash String
+  role         Role
+  status       UserStatus @default(PENDING)
+
+  firstName String
+  lastName  String
+  phone     String?
+
+  // Null only for SUPER_ADMIN — every other role belongs to exactly one
+  // school, and that value is what the tenant-isolation layers in §06
+  // read out of the JWT, never out of the request body.
+  schoolId String?
+  school   School? @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  // Bumped on password change / role change / forced logout — every
+  // access token minted before the bump stops verifying (§05).
+  tokenVersion Int @default(0)
+
+  refreshTokens RefreshToken[]
+
+  // Role-specific 1:1 profiles (§03/§04) — populated only for the role
+  // that owns them (StudentProfile for STUDENT, StaffProfile for
+  // TEACHER/ACCOUNTANT/STAFF); both stay null for SCHOOL_ADMIN/PARENT.
+  studentProfile StudentProfile?
+  staffProfile   StaffProfile?
+
+  // A STUDENT's yearly section membership (§04 — "enrollment is the
+  // yearly hinge") and, separately, the Sections where this user is the
+  // homeroom/class teacher.
+  enrollments    Enrollment[]
+  classTeacherOf Section[]    @relation("SectionClassTeacher")
+
+  // ParentStudent is many-to-many between two USER rows, so both ends
+  // need their own named relation to disambiguate which column they read.
+  guardianOf ParentStudent[] @relation("ParentLinks") // rows where this user is the parent
+  guardians  ParentStudent[] @relation("ChildLinks") // rows where this user is the student
+
+  // Phase 03 (§11): a STUDENT's own attendance history, the records a
+  // TEACHER has marked for others, and the TimetableSlots where this user
+  // is the teacher of record — three more User-to-User-adjacent relations
+  // needing their own name for the same "which column" reason as above.
+  attendanceRecords AttendanceRecord[] @relation("StudentAttendance")
+  attendanceMarked  AttendanceRecord[] @relation("AttendanceMarkedBy")
+  teachingSlots     TimetableSlot[]    @relation("TimetableTeacher")
+
+  // Phase 04/05 (§11): a STUDENT's own results and submissions, the
+  // results a TEACHER has entered for others, the assignments they've
+  // created, and the submissions they've graded — same "every direction
+  // needs its own name" reasoning as the relations above.
+  examResults       Result[]     @relation("StudentResults")
+  resultsEntered    Result[]     @relation("ResultsEntered")
+  assignmentsMade   Assignment[] @relation("AssignmentsCreated")
+  submissions       Submission[] @relation("StudentSubmissions")
+  submissionsGraded Submission[] @relation("SubmissionsGraded")
+
+  // Phase 06 (§11): a STUDENT's own fee charges, and the payments/expenses
+  // an ACCOUNTANT (or SCHOOL_ADMIN, who shares the same Manage scope here,
+  // §07) has recorded — one more "which direction" pair needing its own name.
+  studentFees      StudentFee[]
+  paymentsReceived Payment[]    @relation("PaymentsReceived")
+  expensesRecorded Expense[]    @relation("ExpensesRecorded")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Global, not per-school: login resolves a session from email alone
+  // (§05), and a per-school unique constraint would make that ambiguous
+  // the moment the same address existed at two schools.
+  @@unique([email])
+  @@index([schoolId, role])
+  @@map("users")
+}
+
+/// Opaque rotating refresh tokens. Only the hash is stored; the raw value
+/// lives solely in the client's httpOnly cookie. `family` ties together
+/// every token descended from one login so reuse of a retired token can
+/// revoke the whole chain (§05).
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  family    String
+  userAgent String?
+  revokedAt DateTime?
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([family])
+  @@map("refresh_tokens")
+}
+
+/// Deliberately global, not tenant-scoped — every cross-tenant action a
+/// Super Admin takes is written here (§06), plus any school-scoped
+/// action worth an audit trail once those modules land.
+model AuditLog {
+  id             String   @id @default(cuid())
+  actorUserId    String?
+  action         String
+  targetSchoolId String?
+  entity         String
+  entityId       String?
+  diff           Json?
+  createdAt      DateTime @default(now())
+
+  @@index([targetSchoolId])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 02 — School Admin core setup (§11): academic structure and the
+// people/enrollment tables that sit under it. Every model below carries its
+// own `schoolId` column even where it's also reachable through a parent
+// relation (AcademicYear → Class → Section, or User → StudentProfile) — §03's
+// closing note is explicit that a tenant table's scope is a real column, not
+// something inferred through a join, and it's what lets lib/prisma.ts's
+// tenant-scoping extension (§06 layer 4b) cover these tables for free the
+// moment they're added to TENANT_MODELS.
+// ---------------------------------------------------------------------------
+
+/// One row per school per academic year. `isActive` marks the year new
+/// records (enrollment, attendance, exams once those phases land) default
+/// into — the service layer enforces at most one active year per school.
+model AcademicYear {
+  id        String   @id @default(cuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  label     String // e.g. "2026-2027"
+  startDate DateTime
+  endDate   DateTime
+  isActive  Boolean  @default(false)
+
+  classes       Class[]
+  enrollments   Enrollment[]
+  exams         Exam[]
+  feeStructures FeeStructure[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, label])
+  @@index([schoolId])
+  @@map("academic_years")
+}
+
+/// A grade/standard within one academic year (e.g. "Grade 5"). Scoped to a
+/// year, not evergreen, because a class's section list and roll can differ
+/// year to year even under the same name.
+model Class {
+  id             String       @id @default(cuid())
+  schoolId       String
+  school         School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  name           String
+  order          Int          @default(0)
+
+  sections      Section[]
+  feeStructures FeeStructure[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([academicYearId, name])
+  @@index([schoolId, academicYearId])
+  @@map("classes")
+}
+
+/// A division within a Class (e.g. "A"). `classTeacherId` is optional and
+/// points at a TEACHER; enforcing that role is the service layer's job, not
+/// the schema's — see §07's "ownership, not just role" note.
+model Section {
+  id             String  @id @default(cuid())
+  schoolId       String
+  school         School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classId        String
+  class          Class   @relation(fields: [classId], references: [id], onDelete: Restrict)
+  name           String
+  roomNo         String?
+  classTeacherId String?
+  classTeacher   User?   @relation("SectionClassTeacher", fields: [classTeacherId], references: [id], onDelete: SetNull)
+
+  enrollments       Enrollment[]
+  attendanceRecords AttendanceRecord[]
+  timetableSlots    TimetableSlot[]
+  examSubjects      ExamSubject[]
+  assignments       Assignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([classId, name])
+  @@index([schoolId, classId])
+  @@map("sections")
+}
+
+/// A subject taught at the school. Not year- or class-scoped itself — which
+/// classes/sections/teachers teach it is a join (TeachingAssignment, landing
+/// with Phase 03's timetable) rather than a field here.
+model Subject {
+  id         String  @id @default(cuid())
+  schoolId   String
+  school     School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  name       String
+  code       String
+  isElective Boolean @default(false)
+
+  timetableSlots TimetableSlot[]
+  examSubjects   ExamSubject[]
+  assignments    Assignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, code])
+  @@index([schoolId])
+  @@map("subjects")
+}
+
+/// The 1:1 extension of a STUDENT-role User — everything about a student
+/// that isn't identity/auth (which stays on User, §04). `admissionNo` is
+/// the school-issued id families and staff actually use to refer to a
+/// student, distinct from the internal cuid.
+/// Extended for full enrollment: address, parent/guardian, emergency contact,
+/// profile photo — see spec "student should have personal info … status".
+model StudentProfile {
+  id            String    @id @default(cuid())
+  schoolId      String
+  school        School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  userId        String    @unique
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  admissionNo   String
+  dob           DateTime?
+  gender        String?
+  bloodGroup    String?
+  admissionDate DateTime  @default(now())
+
+  // --- expanded per spec ---
+  address                  String?
+  guardianName             String?
+  guardianPhone            String?
+  guardianRelation         String?
+  emergencyContactName     String?
+  emergencyContactPhone    String?
+  emergencyContactRelation String?
+  profilePhotoUrl          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, admissionNo])
+  @@index([schoolId])
+  @@map("student_profiles")
+}
+
+/// The 1:1 extension of a TEACHER/ACCOUNTANT/STAFF-role User — one profile
+/// shape for every non-teaching-and-teaching staff role rather than three
+/// near-identical tables (§04's "one table, seven roles" logic applied one
+/// level down).
+model StaffProfile {
+  id          String   @id @default(cuid())
+  schoolId    String
+  school      School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  designation String?
+  department  String?
+  joiningDate DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@map("staff_profiles")
+}
+
+/// The yearly hinge (§04): a student doesn't belong to a Section directly,
+/// each academic year produces a fresh row linking student → section → year.
+/// Promotions, repeats and transfers are new rows, so history stays
+/// queryable rather than overwritten in place.
+model Enrollment {
+  id             String           @id @default(cuid())
+  schoolId       String
+  school         School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  studentId      String
+  student        User             @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  sectionId      String
+  section        Section          @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  academicYearId String
+  academicYear   AcademicYear     @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  rollNo         String?
+  status         EnrollmentStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One enrollment per student per year — a transfer between sections
+  // mid-year updates this row's sectionId rather than inserting a second one.
+  @@unique([studentId, academicYearId])
+  @@index([schoolId, sectionId])
+  @@index([schoolId, academicYearId])
+  @@map("enrollments")
+}
+
+/// Many-to-many between a PARENT-role User and a STUDENT-role User, with
+/// metadata — one parent can have several children, one student more than
+/// one guardian.
+model ParentStudent {
+  id                String         @id @default(cuid())
+  schoolId          String
+  school            School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  parentId          String
+  parent            User           @relation("ParentLinks", fields: [parentId], references: [id], onDelete: Cascade)
+  studentId         String
+  student           User           @relation("ChildLinks", fields: [studentId], references: [id], onDelete: Cascade)
+  relation          ParentRelation
+  isPrimaryGuardian Boolean        @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@unique([parentId, studentId])
+  @@index([schoolId, studentId])
+  @@index([schoolId, parentId])
+  @@map("parent_students")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 03 (§11): attendance and timetable. No TeachingAssignment table yet —
+// TimetableSlot's own subjectId/teacherId columns are enough to answer "what
+// does this teacher teach, when" without a separate join table §04 predicted
+// but nothing here actually needs yet.
+// ---------------------------------------------------------------------------
+
+/// One row per student per calendar date — never per class period, since
+/// Phase 03 tracks daily attendance, not per-slot. `sectionId` is captured
+/// at mark time (not derived from the student's current Enrollment) so a
+/// later mid-year transfer doesn't rewrite what a past date actually looked
+/// like. School Admin has Manage; a Teacher's write is additionally
+/// ownership-checked against `classTeacherOf` at the service layer (§07).
+model AttendanceRecord {
+  id         String           @id @default(cuid())
+  schoolId   String
+  school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  studentId  String
+  student    User             @relation("StudentAttendance", fields: [studentId], references: [id], onDelete: Cascade)
+  sectionId  String
+  section    Section          @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  date       DateTime         @db.Date
+  status     AttendanceStatus
+  notes      String?
+  markedById String
+  markedBy   User             @relation("AttendanceMarkedBy", fields: [markedById], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One status per student per day, full stop — re-marking the same date
+  // updates this row rather than inserting a second, conflicting one.
+  @@unique([studentId, date])
+  @@index([schoolId, sectionId, date])
+  @@map("attendance_records")
+}
+
+/// A recurring weekly period: this section has this subject with this
+/// teacher, on this day, between these times. `dayOfWeek` follows
+/// `Date#getDay()` (0 = Sunday … 6 = Saturday) so the frontend never needs
+/// a translation table. School Admin has Manage; Teacher and Student both
+/// get "R (own/self)" — their own weekly schedule via /me/timetable,
+/// never the whole school's.
+model TimetableSlot {
+  id        String  @id @default(cuid())
+  schoolId  String
+  school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  sectionId String
+  section   Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  teacherId String
+  teacher   User    @relation("TimetableTeacher", fields: [teacherId], references: [id], onDelete: Restrict)
+  dayOfWeek Int // 0 (Sunday) .. 6 (Saturday)
+  startTime String // "HH:MM", 24-hour
+  endTime   String // "HH:MM", 24-hour
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, sectionId, dayOfWeek])
+  @@index([schoolId, teacherId, dayOfWeek])
+  @@map("timetable_slots")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 04 (§11): exams, exam subjects, marks entry, results. "Own subject"
+// for a Teacher (§07) is decided the same way Phase 03 decided "own class"
+// for attendance — not a new ownership table, but a service-layer check
+// against a TimetableSlot linking this teacher to this subject+section.
+// ---------------------------------------------------------------------------
+
+/// One exam window per academic year (e.g. "Midterm 2026"). ExamSubject is
+/// where an exam actually meets a section — an Exam by itself is just the
+/// name and the date range it spans.
+model Exam {
+  id             String       @id @default(cuid())
+  schoolId       String
+  school         School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  name           String
+  type           ExamType     @default(OTHER)
+  startDate      DateTime
+  endDate        DateTime
+
+  examSubjects ExamSubject[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([academicYearId, name])
+  @@index([schoolId, academicYearId])
+  @@map("exams")
+}
+
+/// One subject's paper, for one section, within one Exam — the actual unit
+/// marks get entered against. `maxMarks`/`passMarks` live here (not on
+/// Exam) because different subjects in the same exam can carry different
+/// weights.
+model ExamSubject {
+  id        String   @id @default(cuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  examId    String
+  exam      Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  subjectId String
+  subject   Subject  @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  sectionId String
+  section   Section  @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  maxMarks  Int
+  passMarks Int
+  examDate  DateTime
+
+  results Result[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([examId, subjectId, sectionId])
+  @@index([schoolId, sectionId])
+  @@map("exam_subjects")
+}
+
+/// One student's mark for one ExamSubject. `grade` is computed server-side
+/// from `marksObtained` / `examSubject.maxMarks` when not supplied, rather
+/// than left for a teacher to compute by hand.
+model Result {
+  id            String      @id @default(cuid())
+  schoolId      String
+  school        School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  examSubjectId String
+  examSubject   ExamSubject @relation(fields: [examSubjectId], references: [id], onDelete: Cascade)
+  studentId     String
+  student       User        @relation("StudentResults", fields: [studentId], references: [id], onDelete: Cascade)
+  marksObtained Float
+  grade         String?
+  remarks       String?
+  enteredById   String
+  enteredBy     User        @relation("ResultsEntered", fields: [enteredById], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One mark per student per paper — re-entering updates this row.
+  @@unique([examSubjectId, studentId])
+  @@index([schoolId, studentId])
+  @@map("results")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 05 (§11): assignments and submissions. §07 gives Teacher "Manage
+// (own)" here — School Admin only gets "R", so unlike every earlier
+// School-Admin-owned module, the mutating routes below never accept
+// SCHOOL_ADMIN at all.
+// ---------------------------------------------------------------------------
+
+/// Work a Teacher posts to one section for one subject. No file storage is
+/// wired up yet (§12's open items), so submissions are text, not uploads —
+/// `attachmentUrl` is reserved for when that lands rather than a fake
+/// upload button today.
+model Assignment {
+  id            String   @id @default(cuid())
+  schoolId      String
+  school        School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  sectionId     String
+  section       Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  subjectId     String
+  subject       Subject  @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+  title         String
+  description   String?
+  dueDate       DateTime
+  attachmentUrl String?
+  createdById   String
+  createdBy     User     @relation("AssignmentsCreated", fields: [createdById], references: [id], onDelete: Restrict)
+
+  submissions Submission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, sectionId])
+  @@map("assignments")
+}
+
+/// One student's response to one Assignment. `content` is free text (a
+/// written answer, or a link) in lieu of a real file upload. Grading is
+/// optional and separate from submitting — a Student can submit before a
+/// Teacher has looked at anything.
+model Submission {
+  id           String     @id @default(cuid())
+  schoolId     String
+  school       School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  assignmentId String
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  studentId    String
+  student      User       @relation("StudentSubmissions", fields: [studentId], references: [id], onDelete: Cascade)
+  content      String
+  submittedAt  DateTime   @default(now())
+  grade        String?
+  feedback     String?
+  gradedById   String?
+  gradedBy     User?      @relation("SubmissionsGraded", fields: [gradedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // A resubmission updates this row rather than piling up duplicates.
+  @@unique([assignmentId, studentId])
+  @@index([schoolId, assignmentId])
+  @@map("submissions")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 06 (§11) — the Accountant module: fee structures, student fees,
+// payments, receipts, expenses. §07 gives SCHOOL_ADMIN and ACCOUNTANT the
+// same "Manage" scope over fees/payments (unlike every earlier
+// Accountant-adjacent area, there's no ownership split between them to
+// enforce); Expenses is narrower — ACCOUNTANT keeps Manage, SCHOOL_ADMIN
+// drops to "R". §12: no live payment gateway in scope for v1 — every
+// Payment here records money that already moved outside the app.
+// ---------------------------------------------------------------------------
+
+/// A fee plan for one class within one academic year (e.g. "Grade 5 Tuition
+/// 2026-2027"). A FeeStructure by itself is just a name and how often it
+/// recurs — FeeItem is where it actually breaks into billable line items.
+model FeeStructure {
+  id             String       @id @default(cuid())
+  schoolId       String
+  school         School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  classId        String
+  class          Class        @relation(fields: [classId], references: [id], onDelete: Restrict)
+  name           String
+  frequency      FeeFrequency @default(ONE_TIME)
+
+  items FeeItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([academicYearId, classId, name])
+  @@index([schoolId, academicYearId, classId])
+  @@map("fee_structures")
+}
+
+/// One billable line item within a FeeStructure — tuition, transport, a lab
+/// fee — with its own amount and due date. `generate` (the service layer,
+/// not a schema concern) turns one FeeItem into a StudentFee charge for
+/// every student actively enrolled in its structure's class/year.
+model FeeItem {
+  id             String       @id @default(cuid())
+  schoolId       String
+  school         School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  feeStructureId String
+  feeStructure   FeeStructure @relation(fields: [feeStructureId], references: [id], onDelete: Cascade)
+  label          String
+  amount         Float
+  dueDate        DateTime     @db.Date
+
+  studentFees StudentFee[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, feeStructureId])
+  @@map("fee_items")
+}
+
+/// One student's charge for one FeeItem. Generated in bulk (accountant hits
+/// "generate" on a FeeItem) or added one at a time for a late enrollment or
+/// a manual adjustment — either way it's just a row, not a special case.
+/// `amountPaid`/`status` are kept in sync by the Payment service on every
+/// payment, not recomputed from scratch on every read.
+model StudentFee {
+  id         String           @id @default(cuid())
+  schoolId   String
+  school     School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  studentId  String
+  student    User             @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  feeItemId  String
+  feeItem    FeeItem          @relation(fields: [feeItemId], references: [id], onDelete: Restrict)
+  amountDue  Float
+  amountPaid Float            @default(0)
+  status     StudentFeeStatus @default(PENDING)
+
+  payments Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One charge per student per fee item — assigning again updates this row
+  // (e.g. a concession changing amountDue) rather than duplicating it.
+  @@unique([studentId, feeItemId])
+  @@index([schoolId, studentId])
+  @@index([schoolId, feeItemId])
+  @@map("student_fees")
+}
+
+/// One payment recorded against a StudentFee — offline/manual only for v1
+/// (§12), so `method`/`reference` describe how the money actually moved
+/// outside the app (cash in hand, a cheque number, a bank transfer id),
+/// never a gateway transaction id. Always issues exactly one Receipt.
+model Payment {
+  id           String        @id @default(cuid())
+  schoolId     String
+  school       School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  studentFeeId String
+  studentFee   StudentFee    @relation(fields: [studentFeeId], references: [id], onDelete: Restrict)
+  amount       Float
+  method       PaymentMethod
+  reference    String?
+  receivedById String
+  receivedBy   User          @relation("PaymentsReceived", fields: [receivedById], references: [id], onDelete: Restrict)
+  paidAt       DateTime      @default(now())
+
+  receipt Receipt?
+
+  createdAt DateTime @default(now())
+
+  @@index([schoolId, studentFeeId])
+  @@map("payments")
+}
+
+/// One receipt per Payment, issued automatically the moment a payment is
+/// recorded (§11's demo: "an accountant recording a payment and issuing a
+/// receipt"). `receiptNo` is a per-school sequence, human-facing. `pdfUrl`
+/// is reserved for when object storage lands (§12) — until then a receipt
+/// is rendered on demand from this row's own data, the same way
+/// Assignment.attachmentUrl sits unused ahead of real file uploads.
+model Receipt {
+  id        String   @id @default(cuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  paymentId String   @unique
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  receiptNo String
+  pdfUrl    String?
+  issuedAt  DateTime @default(now())
+
+  @@unique([schoolId, receiptNo])
+  @@index([schoolId])
+  @@map("receipts")
+}
+
+/// A school expense — vendor payments, utilities, supplies. ACCOUNTANT gets
+/// Manage; SCHOOL_ADMIN gets R-only (§07) — the one place in this phase
+/// their scope actually narrows below the Accountant's.
+model Expense {
+  id           String   @id @default(cuid())
+  schoolId     String
+  school       School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  category     String
+  amount       Float
+  vendor       String?
+  description  String?
+  date         DateTime @db.Date
+  recordedById String
+  recordedBy   User     @relation("ExpensesRecorded", fields: [recordedById], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, date])
+  @@map("expenses")
+}
+
+/// Backs the `Idempotency-Key` convention §08 requires specifically for
+/// payment-recording endpoints — a retried POST /payments with the same
+/// key replays the first response instead of recording a second payment.
+/// Scoped per school + route so the same key can't collide across callers.
+model IdempotencyKey {
+  id             String   @id @default(cuid())
+  schoolId       String
+  school         School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  route          String
+  key            String
+  responseStatus Int
+  responseBody   Json
+  createdAt      DateTime @default(now())
+
+  @@unique([schoolId, route, key])
+  @@map("idempotency_keys")
+}
+
+// ---------------------------------------------------------------------------
+// Public school website — the one thing in this schema a signed-out visitor
+// ever reads. School Admin edits these rows through the normal
+// authenticated, tenant-scoped API (modules/school-website); a second,
+// independently-deployable app (apps/school-site — one running instance per
+// school, on its own port/host, matching how this feature was scoped)
+// renders them for the public through a single unauthenticated endpoint
+// that explicitly filters by slug, the same discipline Super Admin's
+// cross-tenant reports already use, since no tenant context exists for an
+// anonymous request to scope against (§06).
+// ---------------------------------------------------------------------------
+
+/// One row per school — its public site's editable content. Doesn't exist
+/// until a School Admin first saves something (created on first PATCH);
+/// `isPublished` gates whether the public endpoint will ever serve it, so a
+/// school can draft their site before it's visible to anyone.
+model SchoolWebsite {
+  id             String  @id @default(cuid())
+  schoolId       String  @unique
+  school         School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  tagline        String?
+  heroImageUrl   String?
+  aboutText      String?
+  admissionsText String?
+  contactEmail   String?
+  contactPhone   String?
+  address        String?
+  /// A leadership/founder message — the "Philosophy" block real school
+  /// sites lead with alongside a portrait/campus photo.
+  philosophyText     String?
+  philosophyImageUrl String?
+  /// Four small, together-edited repeatable lists — a real JSON column
+  /// each, not their own tables: a school edits "our key numbers" or "our
+  /// programs" as one cohesive set, never one row at a time the way
+  /// Announcements genuinely accrues over time (hence that one staying a
+  /// real table with its own CRUD). Shapes (enforced by validation-schemas,
+  /// not the database): stats/programs/highlights are `{title, value?,
+  /// description?}[]`, campuses are `{name, address}[]`.
+  stats      Json?
+  highlights Json?
+  programs   Json?
+  campuses   Json?
+  /// A hex color the public site's own deployment styles itself with — the
+  /// one piece of "this is our site, not a generic template" branding a
+  /// school gets without a real asset-upload story (§12: object storage
+  /// still isn't wired up, so `heroImageUrl` above is a plain URL field,
+  /// same "text field standing in for a real upload" pattern as
+  /// Assignment.attachmentUrl).
+  themeColor  String               @default("#2563eb")
+  isPublished Boolean              @default(false)
+  announcements SchoolAnnouncement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("school_websites")
+}
+
+/// A news/announcement entry on a school's public site — "first day of term
+/// is March 4th", "admissions open for 2027", that kind of thing. Newest
+/// `publishedAt` first is the public site's own display order.
+model SchoolAnnouncement {
+  id          String        @id @default(cuid())
+  schoolId    String
+  school      School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  websiteId   String
+  website     SchoolWebsite @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  title       String
+  body        String
+  publishedAt DateTime      @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, publishedAt])
+  @@map("school_announcements")
+}
