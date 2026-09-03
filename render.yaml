@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: campus-ledger-api
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: .
+    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @campus-ledger/api build
+    preDeployCommand: pnpm --filter @campus-ledger/api exec prisma migrate deploy
+    startCommand: pnpm --filter @campus-ledger/api start
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Set for real in the Render dashboard — never commit actual
+      # secrets/URLs here. WEB_ORIGIN must be the exact Vercel URL
+      # (no trailing slash) once that's deployed; the free plan's Postgres
+      # should be a Neon connection string with ?sslmode=require.
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SEED_SUPER_ADMIN_EMAIL
+        sync: false
+      - key: SEED_SUPER_ADMIN_PASSWORD
+        sync: false
+      - key: SEED_SUPER_ADMIN_NAME
+        sync: false
