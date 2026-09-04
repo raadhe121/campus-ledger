@@ -164,10 +164,16 @@ month, expenses by category). Student, Parent and Staff get no Reports scope —
 Not part of §11's phase plan — added on request, and architecturally different from
 everything above it: a normal, public, signed-out-visitor website per school, deliberately
 **not** another page inside the multi-tenant `apps/web` app. `apps/school-site` is its own
-small app, meant to be deployed independently **once per school** (its own process, its own
-port/host — genuinely separate, not path-routing inside one server), configured entirely
-through env vars (`VITE_SCHOOL_SLUG`, `VITE_API_URL`) rather than a per-school build. Every
-deployment still reads from the one shared Postgres database everyone else in this repo uses
+small app — a single deployment serves **any number of schools**, resolved by the `:slug`
+route param in the URL (`/<slug>`, `/<slug>/about`, …) and re-fetched fresh on every visit
+(`App.tsx`'s `SchoolSite` route, `SiteDataProvider`), not baked in at build time. Adding a new
+school never needs a rebuild or a new deployment — the moment its School Admin hits Publish,
+`/<its-slug>` works on every existing deployment. `VITE_SCHOOL_SLUG` is optional and only
+picks what a bare `/` shows (handy for a school's own custom domain going straight to their
+content instead of a landing page); `VITE_API_URL` is the only setting most deployments need.
+Deploying a second, separate instance per school (own host/port) still works if you want that
+instead — nothing about the app requires it anymore, it's just no longer the only option.
+Every deployment still reads from the one shared Postgres database everyone else in this repo uses
 — tenant-scoped, exactly like every other tenant table — through one new unauthenticated
 endpoint, `GET /api/v1/public/schools/:slug`, which explicitly filters by school id rather
 than leaning on tenant-context scoping (there's no caller identity for an anonymous request
@@ -198,15 +204,14 @@ against a published school:
 
 ```bash
 cd apps/school-site
-cp .env.example .env   # set VITE_SCHOOL_SLUG to a real School.slug
+cp .env.example .env   # VITE_API_URL is the only thing most setups need to set
 pnpm install
-PORT=5322 pnpm dev     # → http://localhost:5322/<slug>
+pnpm dev                # → http://localhost:5300/<any published School.slug>
 ```
 
-Run a second instance for a second school on another port (`PORT=5332 VITE_SCHOOL_SLUG=<other
-slug> pnpm dev`) to see two schools' sites running as genuinely independent processes at once,
-each with its own theme color applied at runtime (`lib/theme.ts` picks readable text off the
-school's own hex automatically) — the scenario this feature was built for.
+Visit two different schools' slugs in the same running instance to see this live — each gets
+its own theme color applied at runtime (`lib/theme.ts` picks readable text off the school's
+own hex automatically), fetched fresh per slug, no restart between them.
 
 Every other Student/Teacher/Parent-facing module in §07 (notices) is Phase 07+ and not built
 yet, so none of it is faked here.

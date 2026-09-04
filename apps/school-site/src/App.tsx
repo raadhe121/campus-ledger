@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router-dom";
 import { SiteDataProvider } from "./context/SiteDataProvider";
 import { SiteLayout } from "./layout/SiteLayout";
 import { HomePage } from "./pages/HomePage";
@@ -6,28 +6,34 @@ import { AboutPage } from "./pages/AboutPage";
 import { AdmissionsPage } from "./pages/AdmissionsPage";
 import { AnnouncementsPage } from "./pages/AnnouncementsPage";
 import { ContactPage } from "./pages/ContactPage";
-import { SCHOOL_SLUG } from "./lib/api";
+import { LandingPage } from "./pages/LandingPage";
+import { DEFAULT_SCHOOL_SLUG } from "./lib/api";
+
+/** The `:slug` route param is what actually picks a school now — resolved fresh on every visit, so this one deployment serves any published school with no rebuild needed when a new one is added. */
+function SchoolSite() {
+  const { slug } = useParams<{ slug: string }>();
+  if (!slug) return null;
+  return (
+    <SiteDataProvider key={slug} slug={slug}>
+      <SiteLayout />
+    </SiteDataProvider>
+  );
+}
 
 export function App() {
-  // basename "/" (no slug) still works — the fetch itself will simply
-  // fail with a clear "no VITE_SCHOOL_SLUG configured" message, rendered
-  // by SiteLayout's error state, rather than a router-level crash.
-  const basename = SCHOOL_SLUG ? `/${SCHOOL_SLUG}` : "/";
-
   return (
-    <SiteDataProvider>
-      <BrowserRouter basename={basename}>
-        <Routes>
-          <Route element={<SiteLayout />}>
-            <Route index element={<HomePage />} />
-            <Route path="about" element={<AboutPage />} />
-            <Route path="admissions" element={<AdmissionsPage />} />
-            <Route path="announcements" element={<AnnouncementsPage />} />
-            <Route path="contact" element={<ContactPage />} />
-            <Route path="*" element={<Navigate to="." replace />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
-    </SiteDataProvider>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={DEFAULT_SCHOOL_SLUG ? <Navigate to={`/${DEFAULT_SCHOOL_SLUG}`} replace /> : <LandingPage />} />
+        <Route path="/:slug" element={<SchoolSite />}>
+          <Route index element={<HomePage />} />
+          <Route path="about" element={<AboutPage />} />
+          <Route path="admissions" element={<AdmissionsPage />} />
+          <Route path="announcements" element={<AnnouncementsPage />} />
+          <Route path="contact" element={<ContactPage />} />
+          <Route path="*" element={<Navigate to="." replace />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
   );
 }
